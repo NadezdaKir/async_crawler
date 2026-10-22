@@ -2,3 +2,4 @@
 .DS_Store
 __pycache__/
 crawl_results.json
+error_report.json
