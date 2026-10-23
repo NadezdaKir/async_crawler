@@ -3,3 +3,6 @@
 __pycache__/
 crawl_results.json
 error_report.json
+results.json
+results.csv
+crawler.db
