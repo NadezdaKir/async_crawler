@@ -1,0 +1,36 @@
+# Стартовые адреса обхода
+start_urls:
+  - https://quotes.toscrape.com/
+
+# Настройки краулера
+crawler:
+  max_concurrent: 5         # сколько страниц загружается одновременно
+  max_depth: 2              # глубина обхода от стартовых адресов
+  max_pages: 30             # максимум страниц за обход
+  rate_limit: 2             # запросов в секунду к одному домену
+  per_domain_limit: 2       # одновременных запросов к одному домену
+  respect_robots: true      # соблюдать robots.txt
+  user_agent: AsyncCrawler/1.0
+  min_delay: 0.0            # минимальная пауза между запросами к домену, сек
+  jitter: 0.1               # случайная добавка к паузе, сек
+  max_retries: 2            # повторов при временных ошибках
+
+# Фильтры адресов
+filters:
+  same_domain_only: true    # не уходить на другие сайты
+  exclude_patterns:         # регулярные выражения, такие адреса пропускаются
+    - /login
+  include_patterns: []      # если не пусто, обходятся только подходящие адреса
+
+# Сохранение результатов: json, csv или sqlite
+storage:
+  type: json
+  path: results.json
+
+# Логирование
+logging:
+  log_file: crawler.log
+  console_level: WARNING    # на экран только предупреждения и ошибки
+  file_level: DEBUG         # в файл всё
+  max_bytes: 1000000        # размер файла до ротации
+  backup_count: 3           # сколько старых файлов хранить

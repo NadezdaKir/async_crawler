@@ -6,3 +6,5 @@ error_report.json
 results.json
 results.csv
 crawler.db
+*.log*
+report.html
