@@ -10,7 +10,7 @@
 - Разбор HTML: заголовок, текст, ссылки, метаданные, изображения, заголовки h1–h3, таблицы, списки
 - Вежливость: `robots.txt` и `Crawl-delay`, ограничение запросов в секунду на домен, минимальная пауза и случайный разброс, свой `User-Agent`
 - Обработка ошибок: классификация (временные, постоянные, сетевые, ошибки разбора), повторы с экспоненциальной задержкой, отдельные правила для 429 и 5xx, таймауты, растущие с каждой попыткой, Circuit Breaker для проблемных доменов
-- Хранилища: JSON (JSON Lines или массив), CSV, SQLite, запись пачками, повторы при ошибках сохранения
+- Хранилища: JSON (JSON Lines или массив), CSV, SQLite, запись пачками, повторы при ошибках сохранения без дублей, включая финальную запись при закрытии
 - Загрузка адресов из `sitemap.xml`, включая индексные карты
 - Статистика обхода, экспорт в JSON и HTML-отчёт с таблицами и диаграммами
 - Конфигурация в YAML, командная строка, логирование в файл с ротацией, прогресс в реальном времени
@@ -224,7 +224,7 @@ logging:
 | `export_to_json(filename)` | Сохранить статистику в JSON |
 | `export_to_html_report(filename)` | Сохранить HTML-отчёт с карточками, таблицами и диаграммами |
 | `get_error_stats()` | Ошибки по типам, число повторов, среднее время повтора |
-| `await close()` | Закрыть хранилище и HTTP-сессию |
+| `await close()` | Дописать буфер на диск с повторами, закрыть хранилище и HTTP-сессию. Если запись так и не удалась, бросает `StorageError` |
 
 **`AsyncCrawler(...)`** базовый краулер. Основные параметры: `max_concurrent`, `max_depth`, `per_domain_limit`, `requests_per_second`, `respect_robots`, `user_agent`, `min_delay`, `jitter`, `max_retries`, `backoff_base`, `retry_strategy`, `circuit_breaker`, `storage`, `save_retries`, `connect_timeout`, `read_timeout`, `total_timeout`, `timeout_growth`. Методы: `crawl`, `crawl_sitemap`, `fetch_url`, `fetch_urls`, `fetch_and_parse`, `get_error_stats`, `close`.
 
@@ -248,7 +248,7 @@ logging:
 
 ### Ошибки
 
-`CrawlerError` базовый класс. Наследники: `TransientError` (таймауты, 429, 5xx, повторяются), `PermanentError` (4xx, не повторяются), `NetworkError` (сбои соединения, повторяются), `ParseError` (ошибки разбора), `CircuitOpenError` (домен временно заблокирован). Функция `classify_error(error, url)` превращает исключение `aiohttp` или `asyncio` в один из этих классов.
+`CrawlerError` базовый класс. Наследники: `TransientError` (таймауты, 429, 5xx, повторяются), `PermanentError` (4xx, не повторяются), `NetworkError` (сбои соединения, повторяются), `ParseError` (ошибки разбора), `CircuitOpenError` (домен временно заблокирован), `StorageError` (запись в хранилище не удалась после всех повторов). Функция `classify_error(error, url)` превращает исключение `aiohttp` или `asyncio` в один из этих классов.
 
 ### Функции
 

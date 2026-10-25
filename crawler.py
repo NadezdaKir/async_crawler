@@ -59,10 +59,6 @@ DEFAULT_CONFIG = {
         "type": None,
         "path": None,
     },
-        "storage": {
-        "type": None,
-        "path": None,
-    },
     "logging": {
         "log_file": "crawler.log",
         "console_level": "INFO",
@@ -79,6 +75,7 @@ __all__ = [
     "NetworkError",
     "ParseError",
     "CircuitOpenError",
+    "StorageError",
     "classify_error",
     "RetryStrategy",
     "CircuitBreaker",
@@ -140,6 +137,10 @@ def classify_error(error: Exception, url: str) -> CrawlerError:
     return CrawlerError(type(error).__name__, url)
 
 class CircuitOpenError(CrawlerError):
+    pass
+
+
+class StorageError(CrawlerError):
     pass
 
 
@@ -684,6 +685,15 @@ class DataStorage(ABC):
             "content_type": data.get("content_type") or "",
         }
 
+    async def add_to_buffer(self, entry, limit: int):
+        self.buffer.append(entry)
+        if len(self.buffer) >= limit:
+            try:
+                await self.flush()
+            except Exception:
+                self.buffer.pop()
+                raise
+
     @abstractmethod
     async def save(self, data: dict):
         pass
@@ -709,13 +719,19 @@ class JSONStorage(DataStorage):
         self.file = None
         self.count = 0
         self.writes = 0
+        self.footer_added = False
         self.closed = False
         self.lock = asyncio.Lock()
 
     async def open(self):
-        self.file = await aiofiles.open(self.path, "w", encoding=self.encoding)
+        file = await aiofiles.open(self.path, "w", encoding=self.encoding)
         if self.pretty:
-            await self.file.write("[\n")
+            try:
+                await file.write("[\n")
+            except Exception:
+                await file.close()
+                raise
+        self.file = file
 
     def serialize(self, data: dict) -> str:
         if self.pretty:
@@ -737,13 +753,11 @@ class JSONStorage(DataStorage):
                 await self.open()
             text = self.serialize(data)
             if self.pretty:
-                separator = ",\n" if self.count else ""
-                self.buffer.append(separator + text)
+                entry = (",\n" if self.count else "") + text
             else:
-                self.buffer.append(text + "\n")
+                entry = text + "\n"
+            await self.add_to_buffer(entry, self.buffer_size)
             self.count += 1
-            if len(self.buffer) >= self.buffer_size:
-                await self.flush()
 
     async def close(self):
         async with self.lock:
@@ -751,9 +765,10 @@ class JSONStorage(DataStorage):
                 return
             if self.file is None:
                 await self.open()
+            if self.pretty and not self.footer_added:
+                self.buffer.append("\n]\n")
+                self.footer_added = True
             await self.flush()
-            if self.pretty:
-                await self.file.write("\n]\n")
             await self.file.close()
             self.closed = True
 
@@ -806,9 +821,8 @@ class CSVStorage(DataStorage):
                 )
                 self.fieldnames = list(data.keys())
                 self.buffer.append(self.fieldnames)
-            self.buffer.append([self.to_cell(data.get(field)) for field in self.fieldnames])
-            if len(self.buffer) >= self.buffer_size:
-                await self.flush()
+            row = [self.to_cell(data.get(field)) for field in self.fieldnames]
+            await self.add_to_buffer(row, self.buffer_size)
 
     async def close(self):
         async with self.lock:
@@ -877,9 +891,8 @@ class SQLiteStorage(DataStorage):
         async with self.lock:
             if self.db is None:
                 await self.init_db()
-            self.buffer.append(tuple(self.to_value(data.get(column)) for column in self.COLUMNS))
-            if len(self.buffer) >= self.batch_size:
-                await self.flush()
+            row = tuple(self.to_value(data.get(column)) for column in self.COLUMNS)
+            await self.add_to_buffer(row, self.batch_size)
 
     async def close(self):
         async with self.lock:
@@ -1295,28 +1308,34 @@ class AsyncCrawler:
             )
             return text
 
-    async def save_page(self, record: dict) -> bool:
-        url = record.get("url", "")
+    async def retry_storage(self, operation, action: str, url: str = ""):
         for attempt in range(1, self.save_retries + 2):
             try:
-                await self.storage.save(record)
+                await operation()
+                return
             except Exception as error:
                 if attempt > self.save_retries:
                     logger.error(
-                        "Не удалось сохранить после %d попыток (%s: %s): %s",
-                        attempt, type(error).__name__, error, url,
+                        "Не удалось %s после %d попыток (%s: %s) %s",
+                        action, attempt, type(error).__name__, error, url,
                     )
-                    self.save_errors[url] = f"{type(error).__name__}: {error}"
-                    return False
+                    raise StorageError(f"{type(error).__name__}: {error}", url) from error
                 delay = self.save_retry_delay * 2 ** (attempt - 1)
                 logger.warning(
-                    "Ошибка сохранения на попытке %d (%s: %s), повтор через %.2f сек: %s",
-                    attempt, type(error).__name__, error, delay, url,
+                    "Не удалось %s на попытке %d (%s: %s), повтор через %.2f сек %s",
+                    action, attempt, type(error).__name__, error, delay, url,
                 )
                 await asyncio.sleep(delay)
-            else:
-                self.saved_count += 1
-                return True
+
+    async def save_page(self, record: dict) -> bool:
+        url = record.get("url", "")
+        try:
+            await self.retry_storage(lambda: self.storage.save(record), "сохранить", url)
+        except StorageError as error:
+            self.save_errors[url] = str(error)
+            return False
+        self.saved_count += 1
+        return True
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         tasks = [self.fetch_url(url) for url in urls]
@@ -1423,7 +1442,6 @@ class AsyncCrawler:
             if url is None:
                 if self.in_progress == 0:
                     break
-                await asyncio.sleep(0.1)
                 continue
 
             domain = urlparse(url).netloc
@@ -1434,6 +1452,9 @@ class AsyncCrawler:
                 await asyncio.sleep(min(wait, 0.05))
                 continue
 
+            if len(self.visited_urls) >= max_pages:
+                self.queue.requeue(url, priority=-self.url_depths[url])
+                break
             self.visited_urls.add(url)
             self.in_progress += 1
             try:
@@ -1492,12 +1513,11 @@ class AsyncCrawler:
         return stats
 
     async def close(self):
-        if self.storage:
-            try:
-                await self.storage.close()
-            except Exception as error:
-                logger.error("Не удалось закрыть хранилище (%s: %s)", type(error).__name__, error)
-        await self.session.close()
+        try:
+            if self.storage:
+                await self.retry_storage(self.storage.close, "записать данные и закрыть хранилище")
+        finally:
+            await self.session.close()
 
 class AdvancedCrawler(AsyncCrawler):
     def __init__(self, config: dict | None = None):
@@ -1608,16 +1628,27 @@ def build_config(args: argparse.Namespace) -> dict:
 
 async def run(config: dict):
     crawler = AdvancedCrawler(config)
+    storage_error = None
     try:
         await crawler.crawl()
     finally:
-        await crawler.close()
+        try:
+            await crawler.close()
+        except StorageError as error:
+            storage_error = error
     stats = crawler.get_stats()
     print(f"Обработано: {stats['total_pages']}")
     print(f"Успешно: {stats['successful']}")
     print(f"Ошибок: {stats['failed']}")
-    if config["storage"]["path"]:
-        print(f"Результаты сохранены в {config['storage']['path']}")
+    path = config["storage"]["path"]
+    if not path:
+        return
+    if storage_error:
+        print(f"Результаты НЕ сохранены в {path}: {storage_error}")
+    elif crawler.save_errors:
+        print(f"Сохранено записей: {crawler.saved_count} в {path}, не удалось сохранить: {len(crawler.save_errors)}")
+    else:
+        print(f"Сохранено записей: {crawler.saved_count} в {path}")
 
 
 def main(argv: list[str] | None = None):
